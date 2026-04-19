@@ -1,0 +1,13 @@
+/* App.css — EnergyWatch */
+ 
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+ 
+.App {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f4f7f3 0%, #eef3ed 100%);
+}
+ 
