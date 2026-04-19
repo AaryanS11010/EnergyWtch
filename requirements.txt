@@ -1,0 +1,6 @@
+# EnergyWatch Flask backend dependencies
+# Install with:  pip install -r requirements.txt
+
+flask>=3.0.0
+werkzeug>=3.0.0   # password hashing (pbkdf2:sha256) — comes with Flask
+PyJWT>=2.7.0      # JWT tokens
