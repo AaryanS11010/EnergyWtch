@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar, ReferenceLine } from 'recharts';
 import { Sun, Zap, Battery, Flame, Activity, TrendingUp, TrendingDown, ArrowDownToLine, ArrowUpFromLine, Home, Cpu, AlertCircle, Lock, Mail, User, LogOut, Settings, Bell, Clock, Leaf, Gauge, Sparkles, ChevronRight, Check, MapPin, Navigation, X, RotateCcw, Cloud, CloudRain, CloudSnow, Loader2 } from 'lucide-react';
- 
+
 // -------------------------------------------------------------
-// CONFIG — point this at your backend
+// CONFIG — point this at the Flask backend
 // -------------------------------------------------------------
 const API = 'http://localhost:4000/api';
- 
+
 // -------------------------------------------------------------
 // DEMO MODE — bypasses backend entirely
 // -------------------------------------------------------------
@@ -21,7 +21,7 @@ const DEMO_USER = {
   location_label: 'Columbus, OH',
   created_at: new Date().toISOString(),
 };
- 
+
 // Simulated Open-Meteo shape for Columbus, OH
 const DEMO_WEATHER = (() => {
   const base = Date.now();
@@ -57,7 +57,7 @@ const DEMO_WEATHER = (() => {
     },
   };
 })();
- 
+
 // -------------------------------------------------------------
 // API HELPER
 // -------------------------------------------------------------
@@ -74,9 +74,9 @@ const api = {
     } catch (e) {
       // Network error — backend not running or wrong port
       throw new Error(
-        'Cannot reach the EnergyWatch server. Make sure the backend is running:\n' +
-        '  cd your-project && npm install && node server.js\n' +
-        'Then try again — or use Demo mode below to explore without a backend.'
+        'Cannot reach the EnergyWatch server. Start the Flask backend with:\n' +
+        '  pip install flask pyjwt && python app.py\n' +
+        'Or use Demo mode below to explore without a backend.'
       );
     }
     const data = await res.json().catch(() => ({}));
@@ -97,7 +97,7 @@ const api = {
   geocodeZip(zip)     { return this.request(`/geocode/zip?zip=${encodeURIComponent(zip)}`); },
   weather(lat, lon)   { return this.request(`/weather?lat=${lat}&lon=${lon}`); },
 };
- 
+
 // -------------------------------------------------------------
 // ROOT
 // -------------------------------------------------------------
@@ -111,12 +111,12 @@ export default function EnergyWatch() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showLocationPrompt, setShowLocationPrompt] = useState(false);
   const [toast, setToast] = useState(null);
- 
+
   const showToast = useCallback((msg, kind = 'info') => {
     setToast({ msg, kind });
     setTimeout(() => setToast(null), 3500);
   }, []);
- 
+
   // Boot: try to restore session
   useEffect(() => {
     (async () => {
@@ -132,7 +132,7 @@ export default function EnergyWatch() {
       setBootLoading(false);
     })();
   }, []);
- 
+
   // After login: load notifications + weather, prompt for location if missing
   useEffect(() => {
     if (!user) return;
@@ -153,14 +153,14 @@ export default function EnergyWatch() {
       setShowLocationPrompt(true);
     }
   }, [user?.id]);
- 
+
   const loadNotifications = useCallback(async () => {
     try {
       const { notifications } = await api.getNotifications();
       setNotifications(notifications);
     } catch (e) { console.error(e); }
   }, []);
- 
+
   const loadWeather = useCallback(async (lat, lon) => {
     setWeatherLoading(true);
     try {
@@ -172,12 +172,12 @@ export default function EnergyWatch() {
       setWeatherLoading(false);
     }
   }, [showToast]);
- 
+
   const handleLogout = () => {
     api.setToken(null);
     setUser(null); setWeather(null); setNotifications([]);
   };
- 
+
   const handleLocationSet = async ({ lat, lon, label, zip }) => {
     if (api.token === 'DEMO_TOKEN') {
       setUser(u => ({ ...u, latitude: lat, longitude: lon, location_label: label || zip, zip_code: zip || u.zip_code }));
@@ -196,7 +196,7 @@ export default function EnergyWatch() {
       showToast(e.message || 'Failed to update location', 'error');
     }
   };
- 
+
   const handleRevert = async (id) => {
     if (api.token === 'DEMO_TOKEN') {
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, reverted: true } : n));
@@ -212,7 +212,7 @@ export default function EnergyWatch() {
       showToast(e.message || 'Revert failed', 'error');
     }
   };
- 
+
   const handleMarkAllRead = async () => {
     if (api.token === 'DEMO_TOKEN') {
       setNotifications(prev => prev.map(n => ({ ...n, read: true }))); return;
@@ -220,15 +220,15 @@ export default function EnergyWatch() {
     await api.markAllRead();
     loadNotifications();
   };
- 
+
   if (bootLoading) return <BootScreen />;
- 
+
   if (!user) {
     return <AuthScreen onAuth={(token, user) => { api.setToken(token); setUser(user); }} />;
   }
- 
+
   const unreadCount = notifications.filter(n => !n.read).length;
- 
+
   return (
     <div className="min-h-screen" style={{
       background: 'linear-gradient(180deg, #f4f7f3 0%, #eef3ed 100%)',
@@ -237,7 +237,7 @@ export default function EnergyWatch() {
     }}>
       <style>{globalStyles}</style>
       <BackgroundDecor />
- 
+
       <TopNav
         user={user}
         onLogout={handleLogout}
@@ -247,7 +247,7 @@ export default function EnergyWatch() {
         onBellClick={() => setShowNotifications(true)}
         weather={weather}
       />
- 
+
       <main className="max-w-[1500px] mx-auto px-4 sm:px-6 lg:px-8 py-8 relative z-10">
         {activeTab === 'dashboard' && (
           <Dashboard
@@ -278,9 +278,9 @@ export default function EnergyWatch() {
           />
         )}
       </main>
- 
+
       <Footer />
- 
+
       {showNotifications && (
         <NotificationCenter
           notifications={notifications}
@@ -293,7 +293,7 @@ export default function EnergyWatch() {
           }}
         />
       )}
- 
+
       {showLocationPrompt && (
         <LocationModal
           onClose={() => setShowLocationPrompt(false)}
@@ -301,12 +301,12 @@ export default function EnergyWatch() {
           current={user}
         />
       )}
- 
+
       {toast && <Toast {...toast} />}
     </div>
   );
 }
- 
+
 /* ============== BOOT ============== */
 function BootScreen() {
   return (
@@ -319,7 +319,7 @@ function BootScreen() {
     </div>
   );
 }
- 
+
 /* ============== TOAST ============== */
 function Toast({ msg, kind }) {
   const colors = {
@@ -335,14 +335,14 @@ function Toast({ msg, kind }) {
     </div>
   );
 }
- 
+
 /* ============== GLOBAL STYLES ============== */
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap');
   * { font-family: 'Inter', system-ui, sans-serif; }
   .serif { font-family: 'Instrument Serif', serif; font-weight: 400; letter-spacing: -0.01em; }
   .mono { font-family: 'JetBrains Mono', monospace; }
- 
+
   @keyframes pulse-soft { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.7;transform:scale(1.1)} }
   @keyframes flow { 0%{stroke-dashoffset:100} 100%{stroke-dashoffset:0} }
   @keyframes shimmer { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
@@ -350,14 +350,14 @@ const globalStyles = `
   @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
   @keyframes slideInRight { from{opacity:0;transform:translateX(20px)} to{opacity:1;transform:translateX(0)} }
   @keyframes slideInUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
- 
+
   .pulse-soft { animation: pulse-soft 2.5s ease-in-out infinite; }
   .flow-line { stroke-dasharray: 6 4; animation: flow 2.5s linear infinite; }
   .fade-up { animation: fade-up 0.6s ease-out backwards; }
   .float-slow { animation: float 6s ease-in-out infinite; }
   .animate-spin { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
- 
+
   .card {
     background: rgba(255, 255, 255, 0.7);
     backdrop-filter: blur(20px) saturate(150%);
@@ -399,7 +399,7 @@ const globalStyles = `
   .shimmer-text { background:linear-gradient(90deg,#1a3329,#22c55e 50%,#1a3329); background-size:200% 100%; -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; animation:shimmer 3s linear infinite; }
   .error-text { color:#dc2626; font-size:13px; margin-top:6px; }
 `;
- 
+
 function BackgroundDecor() {
   return (
     <div className="fixed inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0 }}>
@@ -409,7 +409,7 @@ function BackgroundDecor() {
     </div>
   );
 }
- 
+
 /* ============== AUTH (signin / signup / verify) ============== */
 function AuthScreen({ onAuth }) {
   const [view, setView] = useState('signin'); // signin | signup | verify
@@ -418,13 +418,13 @@ function AuthScreen({ onAuth }) {
   const [error, setError] = useState(null);
   const [info, setInfo] = useState(null);
   const [pendingEmail, setPendingEmail] = useState(null);
- 
+
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
- 
+
   const demoLogin = () => {
     onAuth('DEMO_TOKEN', DEMO_USER);
   };
- 
+
   const submit = async () => {
     setError(null); setInfo(null); setLoading(true);
     try {
@@ -458,7 +458,7 @@ function AuthScreen({ onAuth }) {
       }
     } finally { setLoading(false); }
   };
- 
+
   const resend = async () => {
     setError(null); setInfo(null);
     try {
@@ -466,12 +466,12 @@ function AuthScreen({ onAuth }) {
       setInfo('New code sent. Check your inbox.');
     } catch (e) { setError(e.message); }
   };
- 
+
   return (
     <div className="min-h-screen flex" style={{ background: 'linear-gradient(180deg, #f4f7f3 0%, #eef3ed 100%)' }}>
       <style>{globalStyles}</style>
       <BackgroundDecor />
- 
+
       {/* Brand panel */}
       <div className="hidden lg:flex lg:w-1/2 relative overflow-hidden p-12 flex-col z-10">
         <div className="absolute inset-8 rounded-[32px] overflow-hidden" style={{
@@ -511,7 +511,7 @@ function AuthScreen({ onAuth }) {
           </div>
         </div>
       </div>
- 
+
       {/* Form side */}
       <div className="flex-1 flex items-center justify-center p-6 lg:p-12 relative z-10">
         <div className="w-full max-w-md fade-up">
@@ -521,12 +521,12 @@ function AuthScreen({ onAuth }) {
             </div>
             <span className="font-bold text-xl" style={{ color: '#1a2e25' }}>EnergyWatch</span>
           </div>
- 
+
           <div className="chip mb-4" style={{ background: 'rgba(34, 197, 94, 0.1)', color: '#16a34a' }}>
             <Sparkles size={12} />
             {view === 'signin' ? 'Welcome back' : view === 'signup' ? 'Join EnergyWatch' : 'Verify your email'}
           </div>
- 
+
           <h2 className="serif text-5xl mb-3" style={{ color: '#1a2e25' }}>
             {view === 'signin' ? 'Sign in to your grid' : view === 'signup' ? 'Create your account' : 'Check your inbox'}
           </h2>
@@ -535,12 +535,12 @@ function AuthScreen({ onAuth }) {
             {view === 'signup' && 'Start saving from day one. Gmail address required for verification.'}
             {view === 'verify' && `We sent a code to ${pendingEmail}.`}
           </p>
- 
+
           <div className="space-y-4">
             {view === 'signup' && (
               <AuthInput icon={<User size={16} />} label="Full name" value={form.name} onChange={v => update('name', v)} placeholder="Alex Rivera" />
             )}
- 
+
             {view !== 'verify' && (
               <>
                 <AuthInput
@@ -563,7 +563,7 @@ function AuthScreen({ onAuth }) {
                 />
               </>
             )}
- 
+
             {view === 'verify' && (
               <div>
                 <label className="text-sm font-medium mb-1.5 block" style={{ color: '#1a2e25' }}>6-digit code</label>
@@ -589,7 +589,7 @@ function AuthScreen({ onAuth }) {
                 </div>
               </div>
             )}
- 
+
             {error && (
               error.includes('EnergyWatch server') ? (
                 <div className="rounded-2xl p-4" style={{ background: 'rgba(239, 68, 68, 0.07)', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
@@ -601,7 +601,7 @@ function AuthScreen({ onAuth }) {
                     The server at <span className="mono font-semibold">localhost:4000</span> isn't responding. Start it with:
                   </p>
                   <div className="rounded-xl px-3 py-2 mono text-xs mb-3" style={{ background: 'rgba(26,46,37,0.06)', color: '#1a2e25' }}>
-                    npm install &amp;&amp; node server.js
+                    pip install flask pyjwt &amp;&amp; python app.py
                   </div>
                   <button onClick={demoLogin} className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold"
                     style={{ background: 'rgba(245,158,11,0.12)', color: '#b45309', border: '1px solid rgba(245,158,11,0.25)' }}>
@@ -616,12 +616,12 @@ function AuthScreen({ onAuth }) {
               )
             )}
             {info && !error && <div className="text-sm" style={{ color: '#16a34a' }}>{info}</div>}
- 
+
             <button onClick={submit} disabled={loading} className="btn-primary w-full mt-2 flex items-center justify-center gap-2">
               {loading && <Loader2 size={16} className="animate-spin" />}
               {view === 'signin' ? 'Sign in' : view === 'signup' ? 'Send verification code' : 'Verify and enter dashboard'} →
             </button>
- 
+
             {view === 'signin' && (
               <>
                 <div className="flex items-center gap-3 my-1">
@@ -640,7 +640,7 @@ function AuthScreen({ onAuth }) {
                 </button>
               </>
             )}
- 
+
             {view !== 'verify' && (
               <p className="text-center text-sm pt-4" style={{ color: 'rgba(26, 46, 37, 0.6)' }}>
                 {view === 'signin' ? "Don't have an account? " : "Already have one? "}
@@ -656,7 +656,7 @@ function AuthScreen({ onAuth }) {
     </div>
   );
 }
- 
+
 function AuthInput({ icon, label, value, onChange, placeholder, type = 'text', required }) {
   return (
     <div>
@@ -672,7 +672,7 @@ function AuthInput({ icon, label, value, onChange, placeholder, type = 'text', r
     </div>
   );
 }
- 
+
 function StatTile({ label, value, sub }) {
   return (
     <div className="p-4 rounded-2xl" style={{ background: 'rgba(255, 255, 255, 0.06)', border: '1px solid rgba(166, 230, 170, 0.12)' }}>
@@ -682,14 +682,14 @@ function StatTile({ label, value, sub }) {
     </div>
   );
 }
- 
+
 /* ============== LOCATION MODAL ============== */
 function LocationModal({ onClose, onSet, current }) {
   const [mode, setMode] = useState('geo'); // geo | zip
   const [zip, setZip] = useState(current?.zip_code || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
- 
+
   const useGeolocation = () => {
     setError(null);
     if (!navigator.geolocation) return setError('Geolocation not supported by this browser.');
@@ -714,7 +714,7 @@ function LocationModal({ onClose, onSet, current }) {
       { enableHighAccuracy: true, timeout: 10000 }
     );
   };
- 
+
   const useZip = async () => {
     setError(null);
     if (!/^\d{5}$/.test(zip)) return setError('Enter a 5-digit US zip code.');
@@ -726,7 +726,7 @@ function LocationModal({ onClose, onSet, current }) {
       setError(e.message || 'Could not find that zip code.');
     } finally { setLoading(false); }
   };
- 
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(26, 46, 37, 0.35)', backdropFilter: 'blur(8px)' }}>
       <style>{globalStyles}</style>
@@ -734,7 +734,7 @@ function LocationModal({ onClose, onSet, current }) {
         <button onClick={onClose} className="absolute top-5 right-5 w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5" style={{ color: 'rgba(26,46,37,0.5)' }}>
           <X size={18} />
         </button>
- 
+
         <div className="w-12 h-12 rounded-2xl flex items-center justify-center mb-4" style={{ background: 'rgba(34, 197, 94, 0.12)', color: '#16a34a' }}>
           <MapPin size={22} />
         </div>
@@ -742,7 +742,7 @@ function LocationModal({ onClose, onSet, current }) {
         <p className="text-sm mb-6" style={{ color: 'rgba(26, 46, 37, 0.65)' }}>
           Used for accurate weather and solar forecasts. Your coordinates stay on our servers only.
         </p>
- 
+
         <div className="flex gap-2 p-1 rounded-xl mb-5" style={{ background: 'rgba(26, 46, 37, 0.04)' }}>
           {[
             { id: 'geo', label: 'Use my location', icon: <Navigation size={14} /> },
@@ -759,7 +759,7 @@ function LocationModal({ onClose, onSet, current }) {
             </button>
           ))}
         </div>
- 
+
         {mode === 'geo' ? (
           <div>
             <p className="text-sm mb-4" style={{ color: 'rgba(26, 46, 37, 0.7)' }}>
@@ -782,9 +782,9 @@ function LocationModal({ onClose, onSet, current }) {
             </button>
           </div>
         )}
- 
+
         {error && <div className="error-text">{error}</div>}
- 
+
         {current?.location_label && (
           <div className="mt-6 pt-5 border-t text-sm flex items-center gap-2" style={{ borderColor: 'rgba(26, 46, 37, 0.08)', color: 'rgba(26, 46, 37, 0.6)' }}>
             <MapPin size={14} /> Current: <b style={{ color: '#1a2e25' }}>{current.location_label}</b>
@@ -794,7 +794,7 @@ function LocationModal({ onClose, onSet, current }) {
     </div>
   );
 }
- 
+
 /* ============== NOTIFICATION CENTER ============== */
 function NotificationCenter({ notifications, onClose, onRevert, onMarkAllRead, onMarkRead }) {
   return (
@@ -820,7 +820,7 @@ function NotificationCenter({ notifications, onClose, onRevert, onMarkAllRead, o
             <button onClick={onMarkAllRead} className="text-sm font-semibold" style={{ color: '#16a34a' }}>Mark all as read</button>
           )}
         </div>
- 
+
         <div className="p-4 space-y-2">
           {notifications.length === 0 && (
             <div className="py-16 text-center">
@@ -838,7 +838,7 @@ function NotificationCenter({ notifications, onClose, onRevert, onMarkAllRead, o
     </div>
   );
 }
- 
+
 function NotificationItem({ n, onRevert, onMarkRead }) {
   const typeStyle = {
     advisory: { bg: 'rgba(245, 158, 11, 0.12)', color: '#b45309', icon: <AlertCircle size={14} /> },
@@ -846,10 +846,10 @@ function NotificationItem({ n, onRevert, onMarkRead }) {
     alert:    { bg: 'rgba(239, 68, 68, 0.12)',  color: '#dc2626', icon: <AlertCircle size={14} /> },
     info:     { bg: 'rgba(59, 130, 246, 0.12)', color: '#2563eb', icon: <Bell size={14} /> },
   }[n.type] || { bg: 'rgba(100, 116, 139, 0.12)', color: '#475569', icon: <Bell size={14} /> };
- 
+
   const canRevert = !!n.prev_state && !n.reverted;
   const when = new Date(n.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
- 
+
   return (
     <div className="p-4 rounded-2xl border transition-all"
       style={{
@@ -885,7 +885,7 @@ function NotificationItem({ n, onRevert, onMarkRead }) {
     </div>
   );
 }
- 
+
 /* ============== TOP NAV ============== */
 function TopNav({ user, onLogout, activeTab, setActiveTab, unreadCount, onBellClick, weather }) {
   const tabs = [
@@ -895,9 +895,9 @@ function TopNav({ user, onLogout, activeTab, setActiveTab, unreadCount, onBellCl
     { id: 'forecast', label: 'Forecast', icon: <TrendingUp size={15} /> },
     { id: 'settings', label: 'System', icon: <Settings size={15} /> },
   ];
- 
+
   const currentTemp = weather?.current?.temperature_2m;
- 
+
   return (
     <nav className="sticky top-0 z-40 px-4 sm:px-6 lg:px-8 pt-4">
       <div className="max-w-[1500px] mx-auto">
@@ -912,7 +912,7 @@ function TopNav({ user, onLogout, activeTab, setActiveTab, unreadCount, onBellCl
                 <div className="text-[10px] mt-0.5 mono" style={{ color: 'rgba(26, 46, 37, 0.5)' }}>IGS · v2.4.1</div>
               </div>
             </div>
- 
+
             <div className="hidden lg:flex items-center gap-1 p-1 rounded-xl" style={{ background: 'rgba(26, 46, 37, 0.04)' }}>
               {tabs.map(t => (
                 <button key={t.id} onClick={() => setActiveTab(t.id)} className="px-3.5 py-2 text-sm flex items-center gap-2 rounded-lg transition-all"
@@ -927,7 +927,7 @@ function TopNav({ user, onLogout, activeTab, setActiveTab, unreadCount, onBellCl
               ))}
             </div>
           </div>
- 
+
           <div className="flex items-center gap-3">
             {user.location_label && (
               <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs" style={{ background: 'rgba(26, 46, 37, 0.05)', color: 'rgba(26, 46, 37, 0.7)' }}>
@@ -962,7 +962,7 @@ function TopNav({ user, onLogout, activeTab, setActiveTab, unreadCount, onBellCl
             </div>
           </div>
         </div>
- 
+
         <div className="lg:hidden flex overflow-x-auto gap-1 mt-2 pb-1">
           {tabs.map(t => (
             <button key={t.id} onClick={() => setActiveTab(t.id)} className="px-3 py-2 text-xs flex items-center gap-1.5 rounded-lg whitespace-nowrap"
@@ -979,7 +979,7 @@ function TopNav({ user, onLogout, activeTab, setActiveTab, unreadCount, onBellCl
     </nav>
   );
 }
- 
+
 /* ============== DASHBOARD ============== */
 function Dashboard({ user, weather, weatherLoading, onAdvisoryApprove }) {
   const hourlyData = useMemo(() => {
@@ -996,16 +996,16 @@ function Dashboard({ user, weather, weatherLoading, onAdvisoryApprove }) {
     }
     return hours;
   }, []);
- 
+
   const currentHour = new Date().getHours();
   const now = hourlyData[currentHour];
   const greeting = new Date().getHours() < 12 ? 'Good morning' : new Date().getHours() < 18 ? 'Good afternoon' : 'Good evening';
   const firstName = user.name?.split(' ')[0] || user.email?.split('@')[0];
- 
+
   const currentTemp = weather?.current?.temperature_2m;
   const currentCloud = weather?.current?.cloud_cover;
   const currentCode = weather?.current?.weather_code;
- 
+
   return (
     <div className="space-y-6">
       <div className="fade-up">
@@ -1040,16 +1040,16 @@ function Dashboard({ user, weather, weatherLoading, onAdvisoryApprove }) {
           </div>
         </div>
       </div>
- 
+
       <AIDecisionBanner weather={weather} />
- 
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 fade-up" style={{ animationDelay: '0.1s' }}>
         <MetricCard label="Solar generation" value="6.24" unit="kW" trend="+12.4%" trendUp icon={<Sun />} accent="#f59e0b" subtext="Peak 9.1 kW at 1:14 PM" />
         <MetricCard label="Home demand" value="2.11" unit="kW" trend="−3.2%" icon={<Home />} accent="#3b82f6" subtext="HVAC, lighting, EV" />
         <MetricCard label="Battery reserve" value="87" unit="%" trend="Charging" trendUp icon={<Battery />} accent="#22c55e" subtext="11.8 / 13.5 kWh" />
         <MetricCard label="Grid export" value="4.13" unit="kW" trend="+$0.87/hr" trendUp icon={<ArrowUpFromLine />} accent="#ef4444" subtext="Selling at premium" />
       </div>
- 
+
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 fade-up" style={{ animationDelay: '0.2s' }}>
         <div className="xl:col-span-2 card p-7">
           <div className="flex items-start justify-between mb-5">
@@ -1063,7 +1063,7 @@ function Dashboard({ user, weather, weatherLoading, onAdvisoryApprove }) {
           </div>
           <PowerFlowDiagram />
         </div>
- 
+
         <div className="card p-7">
           <p className="label-caps">24h price signal</p>
           <h3 className="serif text-3xl mt-1 mb-1" style={{ color: '#1a2e25' }}>Grid pricing</h3>
@@ -1090,7 +1090,7 @@ function Dashboard({ user, weather, weatherLoading, onAdvisoryApprove }) {
           </div>
         </div>
       </div>
- 
+
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 fade-up" style={{ animationDelay: '0.3s' }}>
         <div className="xl:col-span-2 card p-7">
           <div className="flex items-start justify-between mb-5 flex-wrap gap-3">
@@ -1117,7 +1117,7 @@ function Dashboard({ user, weather, weatherLoading, onAdvisoryApprove }) {
             </LineChart>
           </ResponsiveContainer>
         </div>
- 
+
         <div className="card-dark p-7 relative overflow-hidden">
           <div className="absolute -top-16 -right-16 w-40 h-40 rounded-full blur-3xl" style={{ background: 'rgba(167, 243, 208, 0.4)' }} />
           <div className="relative">
@@ -1148,23 +1148,23 @@ function Dashboard({ user, weather, weatherLoading, onAdvisoryApprove }) {
           </div>
         </div>
       </div>
- 
+
       <AdvisoryCard weather={weather} onApprove={onAdvisoryApprove} />
     </div>
   );
 }
- 
+
 /* ============== AI DECISION BANNER ============== */
 function AIDecisionBanner({ weather }) {
   const cloud = weather?.current?.cloud_cover ?? 8;
   const radiation = weather?.current?.shortwave_radiation;
   const solarCapacity = radiation != null ? Math.min(100, Math.round((radiation / 900) * 100)) : 92;
- 
+
   return (
     <div className="card-dark p-7 relative overflow-hidden fade-up" style={{ animationDelay: '0.05s' }}>
       <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full blur-3xl opacity-30" style={{ background: '#ef4444' }} />
       <div className="absolute -bottom-20 -left-20 w-64 h-64 rounded-full blur-3xl opacity-20" style={{ background: '#22c55e' }} />
- 
+
       <div className="relative grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
         <div className="lg:col-span-5">
           <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -1182,13 +1182,13 @@ function AIDecisionBanner({ weather }) {
             Peak pricing detected. Routing 4.13 kW surplus solar to the grid while the battery holds 87% for your evening demand.
           </p>
         </div>
- 
+
         <div className="lg:col-span-3 grid grid-cols-3 lg:grid-cols-1 gap-3">
           <MiniStat label="Confidence" value="94%" color="#a7f3d0" />
           <MiniStat label="Revenue / hr" value="+$0.87" color="#a7f3d0" />
           <MiniStat label="Next review" value="18 min" color="#fde68a" />
         </div>
- 
+
         <div className="lg:col-span-4 p-5 rounded-2xl" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(167, 243, 208, 0.1)' }}>
           <p className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: '#a7f3d0' }}>Reasoning</p>
           <div className="space-y-2 text-sm" style={{ color: 'rgba(240, 245, 242, 0.9)' }}>
@@ -1202,7 +1202,7 @@ function AIDecisionBanner({ weather }) {
     </div>
   );
 }
- 
+
 /* ============== ADVISORY ============== */
 function AdvisoryCard({ weather, onApprove }) {
   // Derive a real advisory from the forecast if available
@@ -1228,7 +1228,7 @@ function AdvisoryCard({ weather, onApprove }) {
       dropPct
     };
   }, [weather]);
- 
+
   const handleApprove = () => {
     onApprove({
       type: 'advisory',
@@ -1239,7 +1239,7 @@ function AdvisoryCard({ weather, onApprove }) {
       new_state: { battery_target: 100, mode: 'pre_charge_night', trigger_day: advisory.day }
     });
   };
- 
+
   return (
     <div className="card-dark p-7 relative overflow-hidden fade-up" style={{ animationDelay: '0.4s' }}>
       <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full blur-3xl opacity-30" style={{ background: '#fde68a' }} />
@@ -1265,7 +1265,7 @@ function AdvisoryCard({ weather, onApprove }) {
     </div>
   );
 }
- 
+
 /* ============== WEATHER ICON ============== */
 function WeatherIcon({ code, cloud, size = 16 }) {
   if (code == null) return <Cloud size={size} />;
@@ -1277,7 +1277,7 @@ function WeatherIcon({ code, cloud, size = 16 }) {
   if (code >= 80 && code <= 99) return <CloudRain size={size} />;
   return <Cloud size={size} />;
 }
- 
+
 function describeWeather(code) {
   if (code == null) return '';
   if (code === 0) return 'Clear';
@@ -1289,7 +1289,7 @@ function describeWeather(code) {
   if (code >= 80) return 'Showers';
   return '';
 }
- 
+
 function ReasonItem({ text }) {
   return (
     <div className="flex items-center gap-2">
@@ -1300,7 +1300,7 @@ function ReasonItem({ text }) {
     </div>
   );
 }
- 
+
 function MiniStat({ label, value, color }) {
   return (
     <div className="p-3 rounded-xl" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(167, 243, 208, 0.08)' }}>
@@ -1309,7 +1309,7 @@ function MiniStat({ label, value, color }) {
     </div>
   );
 }
- 
+
 function MetricCard({ label, value, unit, trend, trendUp, icon, accent, subtext }) {
   return (
     <div className="card p-5">
@@ -1332,11 +1332,11 @@ function MetricCard({ label, value, unit, trend, trendUp, icon, accent, subtext 
     </div>
   );
 }
- 
+
 function LegendDot({ color, label }) {
   return <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full" style={{ background: color }} /><span style={{ color: 'rgba(26, 46, 37, 0.65)' }}>{label}</span></div>;
 }
- 
+
 function SavingsRow({ label, value, positive }) {
   return (
     <div className="flex justify-between items-center py-2.5 border-b" style={{ borderColor: 'rgba(167, 243, 208, 0.08)' }}>
@@ -1345,13 +1345,13 @@ function SavingsRow({ label, value, positive }) {
     </div>
   );
 }
- 
+
 function PriceStat({ label, value, color }) {
   return (
     <div><p className="label-caps">{label}</p><p className="text-base font-bold mt-1" style={{ color }}>{value}</p></div>
   );
 }
- 
+
 /* ============== POWER FLOW ============== */
 function PowerFlowDiagram() {
   return (
@@ -1386,7 +1386,7 @@ function PowerFlowDiagram() {
     </svg>
   );
 }
- 
+
 function FlowNode({ x, y, label, value, color, icon, big, dim }) {
   const size = big ? 48 : 40;
   return (
@@ -1406,7 +1406,7 @@ function FlowNode({ x, y, label, value, color, icon, big, dim }) {
     </g>
   );
 }
- 
+
 /* ============== ENERGY SOURCES ============== */
 function EnergySources() {
   const sources = [
@@ -1423,7 +1423,7 @@ function EnergySources() {
     { name: 'Hydro', value: 5, color: '#06b6d4' },
     { name: 'Coal', value: 2, color: '#475569' },
   ];
- 
+
   return (
     <div className="space-y-6">
       <div className="fade-up">
@@ -1484,7 +1484,7 @@ function EnergySources() {
     </div>
   );
 }
- 
+
 function SourceCard({ name, percent, kwh, icon, color, status }) {
   return (
     <div className="card p-5 relative overflow-hidden">
@@ -1503,7 +1503,7 @@ function SourceCard({ name, percent, kwh, icon, color, status }) {
     </div>
   );
 }
- 
+
 function SourceStackedChart() {
   const data = useMemo(() => {
     const arr = [];
@@ -1530,7 +1530,7 @@ function SourceStackedChart() {
     </ResponsiveContainer>
   );
 }
- 
+
 function DeviceCard({ name, load, percent, source, color }) {
   return (
     <div className="p-4 rounded-2xl" style={{ background: 'rgba(255, 255, 255, 0.6)', border: '1px solid rgba(26, 46, 37, 0.06)' }}>
@@ -1545,7 +1545,7 @@ function DeviceCard({ name, load, percent, source, color }) {
     </div>
   );
 }
- 
+
 /* ============== AI DECISIONS ============== */
 function AIDecisions() {
   const models = [
@@ -1597,7 +1597,7 @@ function AIDecisions() {
     </div>
   );
 }
- 
+
 function DispatchPlan() {
   const hours = [
     { h: 'Now · 14:00', action: 'Sell', color: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)', reason: 'Peak tariff · surplus solar' },
@@ -1622,7 +1622,7 @@ function DispatchPlan() {
     </div>
   );
 }
- 
+
 function DecisionTree() {
   return (
     <div className="space-y-2.5">
@@ -1645,7 +1645,7 @@ function DecisionTree() {
     </div>
   );
 }
- 
+
 function TreeRow({ depth, label, pass, bold, detail, color }) {
   return (
     <div className="flex items-center gap-3 text-sm" style={{ paddingLeft: depth * 16 }}>
@@ -1659,7 +1659,7 @@ function TreeRow({ depth, label, pass, bold, detail, color }) {
     </div>
   );
 }
- 
+
 /* ============== FORECAST ============== */
 function ForecastPanel({ weather, user }) {
   // Convert Open-Meteo daily to displayable format
@@ -1687,7 +1687,7 @@ function ForecastPanel({ weather, user }) {
       };
     });
   }, [weather]);
- 
+
   return (
     <div className="space-y-6">
       <div className="fade-up">
@@ -1697,7 +1697,7 @@ function ForecastPanel({ weather, user }) {
           Live weather from Open-Meteo{user?.location_label ? <> for <b>{user.location_label}</b></> : ''}. The AI uses this to drive every dispatch decision.
         </p>
       </div>
- 
+
       {!forecast && (
         <div className="card p-10 text-center">
           <Loader2 size={24} className="animate-spin mx-auto mb-3" style={{ color: '#22c55e' }} />
@@ -1706,7 +1706,7 @@ function ForecastPanel({ weather, user }) {
           </p>
         </div>
       )}
- 
+
       {forecast && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 fade-up" style={{ animationDelay: '0.1s' }}>
           {forecast.map((d, i) => (
@@ -1735,7 +1735,7 @@ function ForecastPanel({ weather, user }) {
           ))}
         </div>
       )}
- 
+
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 fade-up" style={{ animationDelay: '0.2s' }}>
         <div className="card p-7">
           <p className="label-caps">7-day price forecast</p>
@@ -1751,7 +1751,7 @@ function ForecastPanel({ weather, user }) {
     </div>
   );
 }
- 
+
 function ForecastPriceChart() {
   const data = useMemo(() => {
     const arr = [];
@@ -1778,7 +1778,7 @@ function ForecastPriceChart() {
     </ResponsiveContainer>
   );
 }
- 
+
 function ForecastSolarChart({ weather }) {
   const data = useMemo(() => {
     if (weather?.daily?.shortwave_radiation_sum) {
@@ -1808,7 +1808,7 @@ function ForecastSolarChart({ weather }) {
     </ResponsiveContainer>
   );
 }
- 
+
 /* ============== SETTINGS ============== */
 function SettingsPanel({ user, onShowLocation }) {
   return (
@@ -1860,7 +1860,7 @@ function SettingsPanel({ user, onShowLocation }) {
     </div>
   );
 }
- 
+
 function SettingRow({ label, value, badge, action }) {
   return (
     <div className="flex justify-between items-center py-3 border-b" style={{ borderColor: 'rgba(26, 46, 37, 0.06)' }}>
@@ -1873,7 +1873,7 @@ function SettingRow({ label, value, badge, action }) {
     </div>
   );
 }
- 
+
 function HardwareRow({ label, value }) {
   return (
     <div>
@@ -1882,7 +1882,7 @@ function HardwareRow({ label, value }) {
     </div>
   );
 }
- 
+
 function PreferenceCard({ title, value, desc, active }) {
   return (
     <div className="p-5 rounded-2xl transition-all" style={{
@@ -1895,7 +1895,7 @@ function PreferenceCard({ title, value, desc, active }) {
     </div>
   );
 }
- 
+
 /* ============== FOOTER ============== */
 function Footer() {
   return (
