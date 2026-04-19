@@ -1190,7 +1190,8 @@ function NotificationItem({ n, onRevert, onMarkRead }) {
   }[n.type] || { bg: 'rgba(100, 116, 139, 0.12)', color: '#475569', icon: <Bell size={14} /> };
 
   const canRevert = !!n.prev_state && !n.reverted;
-  const when = new Date(n.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const rawDate = n.created_at?.endsWith('Z') ? n.created_at : n.created_at + 'Z';
+  const when = new Date(rawDate).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
   return (
     <div className="p-4 rounded-2xl border transition-all"
