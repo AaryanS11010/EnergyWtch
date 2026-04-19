@@ -232,68 +232,82 @@ function useSystemStats(aiSettings, hardware, hour) {
 // and returns structured JSON for the decision banner, advisory,
 // dispatch plan, and decision tree reasoning.
 // -------------------------------------------------------------
-const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const CLAUDE_MODEL = 'claude-sonnet-4-5';
 
 function useClaudeAI(weather, stats, aiSettings, hardware, enabled = true) {
   const [claudeData, setClaudeData] = useState(null);
   const [claudeLoading, setClaudeLoading] = useState(false);
   const [claudeError, setClaudeError] = useState(null);
   const lastFetchRef = useRef(0);
+  const fetchingRef = useRef(false);
 
-  const fetchDecision = useCallback(async () => {
-    if (!enabled || !stats || !aiSettings) return;
+  // Stable refs so fetchDecision doesn't need them as deps
+  const weatherRef = useRef(weather);
+  const statsRef = useRef(stats);
+  const aiSettingsRef = useRef(aiSettings);
+  const hardwareRef = useRef(hardware);
+  useEffect(() => { weatherRef.current = weather; }, [weather]);
+  useEffect(() => { statsRef.current = stats; }, [stats]);
+  useEffect(() => { aiSettingsRef.current = aiSettings; }, [aiSettings]);
+  useEffect(() => { hardwareRef.current = hardware; }, [hardware]);
 
-    // Throttle: only re-call Claude every 60 seconds
+  const fetchDecision = useCallback(async (force = false) => {
+    if (!enabled) return;
+    if (fetchingRef.current) return;
+    const s = aiSettingsRef.current;
+    const hw = hardwareRef.current;
+    const st = statsRef.current;
+    const wx = weatherRef.current;
+    if (!s || !hw) return;
+
+    // Throttle: skip if fetched in last 60s unless forced
     const now = Date.now();
-    if (now - lastFetchRef.current < 60000) return;
+    if (!force && now - lastFetchRef.current < 60000) return;
     lastFetchRef.current = now;
+    fetchingRef.current = true;
 
     setClaudeLoading(true);
     setClaudeError(null);
 
     const currentHour = new Date().getHours();
-    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-    // Build a rich context snapshot for Claude
     const context = {
-      time: timeStr,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       hour: currentHour,
-      location: hardware?.gasUtility || 'Unknown location',
-      weather: weather?.current ? {
-        temperature_f: Math.round(weather.current.temperature_2m),
-        cloud_cover_pct: weather.current.cloud_cover,
-        solar_irradiance_wm2: weather.current.shortwave_radiation,
-        wind_mph: weather.current.wind_speed_10m,
-        condition: weather.current.weather_code,
+      location: hw?.gasUtility || 'Unknown',
+      weather: wx?.current ? {
+        temperature_f: Math.round(wx.current.temperature_2m),
+        cloud_cover_pct: wx.current.cloud_cover,
+        solar_irradiance_wm2: wx.current.shortwave_radiation,
+        wind_mph: wx.current.wind_speed_10m,
       } : null,
-      forecast_7day: weather?.daily ? weather.daily.time.map((t, i) => ({
+      forecast_7day: wx?.daily ? wx.daily.time.map((t, i) => ({
         date: t,
-        max_f: Math.round(weather.daily.temperature_2m_max[i]),
-        min_f: Math.round(weather.daily.temperature_2m_min[i]),
-        radiation_mj: weather.daily.shortwave_radiation_sum[i]?.toFixed(1),
-        precip_mm: weather.daily.precipitation_sum[i],
+        max_f: Math.round(wx.daily.temperature_2m_max[i]),
+        min_f: Math.round(wx.daily.temperature_2m_min[i]),
+        radiation_mj: wx.daily.shortwave_radiation_sum[i]?.toFixed(1),
+        precip_mm: wx.daily.precipitation_sum[i],
       })) : [],
       system: {
-        solar_array_kw: hardware?.solarKw,
-        battery_kwh: hardware?.batteryKwh,
-        battery_soc_pct: stats.battSoc,
-        solar_now_kw: stats.solarKw,
-        demand_now_kw: stats.demandKw,
-        export_now_kw: stats.exportKw,
-        grid_price_per_kwh: stats.gridPrice,
-        surplus_kw: stats.surplus,
+        solar_array_kw: hw?.solarKw,
+        battery_kwh: hw?.batteryKwh,
+        battery_soc_pct: st?.battSoc ?? 87,
+        solar_now_kw: st?.solarKw ?? 0,
+        demand_now_kw: st?.demandKw ?? 0,
+        export_now_kw: st?.exportKw ?? 0,
+        grid_price_per_kwh: st?.gridPrice ?? 0,
+        surplus_kw: st?.surplus ?? 0,
       },
       ai_settings: {
-        strategy: aiSettings.strategy,
-        battery_reserve_pct: aiSettings.batteryReserve,
-        sell_threshold: aiSettings.sellThreshold,
-        buy_threshold: aiSettings.buyThreshold,
-        peak_start_hour: aiSettings.peakStart,
-        peak_end_hour: aiSettings.peakEnd,
+        strategy: s.strategy,
+        battery_reserve_pct: s.batteryReserve,
+        sell_threshold: s.sellThreshold,
+        buy_threshold: s.buyThreshold,
+        peak_start_hour: s.peakStart,
+        peak_end_hour: s.peakEnd,
       },
     };
 
-    const prompt = `You are the AI engine for EnergyWatch, a residential solar-plus-storage energy management system. 
+    const prompt = `You are the AI engine for EnergyWatch, a residential solar-plus-storage energy management system.
 Analyze the current system state and produce an energy dispatch decision.
 
 CURRENT SYSTEM SNAPSHOT:
@@ -302,14 +316,14 @@ ${JSON.stringify(context, null, 2)}
 Respond ONLY with a valid JSON object (no markdown, no preamble) with this exact structure:
 {
   "decision": "Sell" | "Buy" | "Charge" | "Discharge" | "Hold" | "Consume",
-  "headline": "Short 3-5 word action phrase (e.g. 'Selling surplus to grid')",
-  "reasoning": "2-3 sentence natural language explanation of why this decision was made right now, referencing actual data values",
+  "headline": "Short 3-5 word action phrase",
+  "reasoning": "2-3 sentence natural language explanation referencing actual data values",
   "confidence": 0-100,
-  "revenue_per_hr": "$X.XX/hr gained or saved (or null)",
+  "revenue_per_hr": "$X.XX/hr or null",
   "key_factors": ["factor 1", "factor 2", "factor 3"],
   "advisory": {
     "title": "Short advisory title based on 7-day forecast",
-    "body": "2-3 sentence strategic recommendation based on the forecast data",
+    "body": "2-3 sentence strategic recommendation",
     "action": "PRE_CHARGE" | "SELL_AHEAD" | "CONSERVE" | "HOLD",
     "estimated_savings": "$X.XX"
   },
@@ -317,47 +331,52 @@ Respond ONLY with a valid JSON object (no markdown, no preamble) with this exact
     { "hour": "HH:00", "action": "Sell|Buy|Charge|Discharge|Hold|Consume", "reason": "brief reason" }
   ],
   "tree_checks": [
-    { "label": "check description with actual values", "pass": true|false, "detail": "value" }
+    { "label": "check description with actual values", "pass": true, "detail": "value" }
   ]
 }
 
-Make dispatch_next_6h start from hour ${currentHour} and cover the next 6 hours.
-Make tree_checks cover: grid price vs threshold, solar surplus, battery SoC vs reserve, peak window, weather outlook.
-Be specific — use real numbers from the snapshot in your reasoning.`;
+Make dispatch_next_6h cover the next 6 hours starting from hour ${currentHour}.
+Make tree_checks cover: grid price vs threshold, solar surplus, battery SoC vs reserve, peak window, weather.
+Use real numbers from the snapshot.`;
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch(`${API}/claude`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: CLAUDE_MODEL,
           max_tokens: 1000,
           messages: [{ role: 'user', content: prompt }],
         }),
       });
 
-      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${response.status}`);
+      }
       const data = await response.json();
+      console.log('Claude response received:', data.stop_reason);
       const text = data.content?.map(c => c.text || '').join('') || '';
       const clean = text.replace(/```json|```/g, '').trim();
       const parsed = JSON.parse(clean);
       setClaudeData(parsed);
     } catch (e) {
-      console.error('Claude API error:', e);
+      console.error('Claude AI error:', e.message);
       setClaudeError(e.message);
     } finally {
       setClaudeLoading(false);
+      fetchingRef.current = false;
     }
-  }, [weather, stats, aiSettings, hardware, enabled]);
+  }, [enabled]); // stable — reads live data via refs
 
-  // Fetch on mount and every 60s
+  // Fire immediately on mount, then every 60s
   useEffect(() => {
-    fetchDecision();
-    const id = setInterval(fetchDecision, 60000);
+    fetchDecision(true); // force on first mount
+    const id = setInterval(() => fetchDecision(false), 60000);
     return () => clearInterval(id);
   }, [fetchDecision]);
 
-  return { claudeData, claudeLoading, claudeError, refresh: fetchDecision };
+  const refresh = useCallback(() => fetchDecision(true), [fetchDecision]);
+  return { claudeData, claudeLoading, claudeError, refresh };
 }
 function useLocalTime(timezone) {
   const [time, setTime] = useState(() => new Date());
@@ -752,34 +771,30 @@ function BackgroundDecor() {
   );
 }
 
-/* ============== AUTH (signin / signup / verify) ============== */
+/* ============== AUTH (signin / signup / verify / forgot) ============== */
 function AuthScreen({ onAuth }) {
-  const [view, setView] = useState('signin'); // signin | signup | verify
-  const [form, setForm] = useState({ email: '', password: '', name: '', code: '' });
+  const [view, setView] = useState('signin'); // signin | signup | verify | forgot | forgot_sent
+  const [form, setForm] = useState({ email: '', password: '', name: '', code: '', newPassword: '', confirmPassword: '' });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [info, setInfo] = useState(null);
   const [pendingEmail, setPendingEmail] = useState(null);
 
   const update = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const switchView = (v) => { setView(v); setError(null); setInfo(null); };
 
-  const demoLogin = () => {
-    onAuth('DEMO_TOKEN', DEMO_USER);
-  };
+  const demoLogin = () => { onAuth('DEMO_TOKEN', DEMO_USER); };
 
   const submit = async () => {
     setError(null); setInfo(null); setLoading(true);
     try {
       if (view === 'signin') {
-        // Req #6: block empty email/password on client (server also enforces)
         if (!form.email.trim() || !form.password) throw new Error('Email and password are required.');
         const { token, user } = await api.signin({ email: form.email, password: form.password });
         onAuth(token, user);
       } else if (view === 'signup') {
-        // Req #6: cannot proceed without email + password
         if (!form.email.trim()) throw new Error('Gmail address is required.');
         if (!form.password) throw new Error('Password is required.');
-        // Req #5: Gmail only (backend also enforces)
         if (!/@gmail\.com$/i.test(form.email.trim())) throw new Error('Must be a Gmail address (for verification email).');
         if (form.password.length < 8) throw new Error('Password must be at least 8 characters.');
         await api.signup({ email: form.email, password: form.password, name: form.name });
@@ -790,6 +805,18 @@ function AuthScreen({ onAuth }) {
         if (!/^\d{6}$/.test(form.code)) throw new Error('Enter the 6-digit code.');
         const { token, user } = await api.verify({ email: pendingEmail, code: form.code });
         onAuth(token, user);
+      } else if (view === 'forgot') {
+        if (!form.email.trim()) throw new Error('Enter your Gmail address.');
+        await api.request('/auth/forgot', { method: 'POST', body: { email: form.email.trim().toLowerCase() } });
+        setPendingEmail(form.email.trim().toLowerCase());
+        setView('forgot_sent');
+      } else if (view === 'forgot_sent') {
+        if (!/^\d{6}$/.test(form.code)) throw new Error('Enter the 6-digit reset code.');
+        if (form.newPassword.length < 8) throw new Error('New password must be at least 8 characters.');
+        if (form.newPassword !== form.confirmPassword) throw new Error('Passwords do not match.');
+        await api.request('/auth/reset', { method: 'POST', body: { email: pendingEmail, code: form.code, newPassword: form.newPassword } });
+        setView('signin');
+        setInfo('Password reset successfully. Sign in with your new password.');
       }
     } catch (e) {
       setError(e.message || 'Something went wrong');
@@ -804,8 +831,13 @@ function AuthScreen({ onAuth }) {
   const resend = async () => {
     setError(null); setInfo(null);
     try {
-      await api.resend({ email: pendingEmail });
-      setInfo('New code sent. Check your inbox.');
+      if (view === 'forgot_sent') {
+        await api.request('/auth/forgot', { method: 'POST', body: { email: pendingEmail } });
+        setInfo('New reset code sent. Check your inbox.');
+      } else {
+        await api.resend({ email: pendingEmail });
+        setInfo('New code sent. Check your inbox.');
+      }
     } catch (e) { setError(e.message); }
   };
 
@@ -866,16 +898,18 @@ function AuthScreen({ onAuth }) {
 
           <div className="chip mb-4" style={{ background: 'rgba(34, 197, 94, 0.1)', color: '#16a34a' }}>
             <Sparkles size={12} />
-            {view === 'signin' ? 'Welcome back' : view === 'signup' ? 'Join EnergyWatch' : 'Verify your email'}
+            {view === 'signin' ? 'Welcome back' : view === 'signup' ? 'Join EnergyWatch' : view === 'verify' ? 'Verify your email' : view === 'forgot' ? 'Reset password' : 'Check your inbox'}
           </div>
 
           <h2 className="serif text-5xl mb-3" style={{ color: '#1a2e25' }}>
-            {view === 'signin' ? 'Sign in to your grid' : view === 'signup' ? 'Create your account' : 'Check your inbox'}
+            {view === 'signin' ? 'Sign in to your grid' : view === 'signup' ? 'Create your account' : view === 'verify' ? 'Check your inbox' : view === 'forgot' ? 'Forgot your password?' : 'Reset your password'}
           </h2>
           <p className="mb-8" style={{ color: 'rgba(26, 46, 37, 0.6)' }}>
             {view === 'signin' && 'Your energy, optimized — every second.'}
             {view === 'signup' && 'Start saving from day one. Gmail address required for verification.'}
             {view === 'verify' && `We sent a code to ${pendingEmail}.`}
+            {view === 'forgot' && "Enter your Gmail and we'll send a 6-digit reset code."}
+            {view === 'forgot_sent' && `Enter the reset code sent to ${pendingEmail} and choose a new password.`}
           </p>
 
           <div className="space-y-4">
@@ -883,17 +917,20 @@ function AuthScreen({ onAuth }) {
               <AuthInput icon={<User size={16} />} label="Full name" value={form.name} onChange={v => update('name', v)} placeholder="Alex Rivera" />
             )}
 
-            {view !== 'verify' && (
-              <>
-                <AuthInput
-                  icon={<Mail size={16} />}
-                  label={view === 'signup' ? 'Gmail address' : 'Email'}
-                  value={form.email}
-                  onChange={v => update('email', v)}
-                  placeholder={view === 'signup' ? 'you@gmail.com' : 'you@example.com'}
-                  type="email"
-                  required
-                />
+            {(view === 'signin' || view === 'signup' || view === 'forgot') && (
+              <AuthInput
+                icon={<Mail size={16} />}
+                label={view === 'signup' ? 'Gmail address' : 'Email'}
+                value={form.email}
+                onChange={v => update('email', v)}
+                placeholder={view === 'signup' ? 'you@gmail.com' : 'you@example.com'}
+                type="email"
+                required
+              />
+            )}
+
+            {(view === 'signin' || view === 'signup') && (
+              <div>
                 <AuthInput
                   icon={<Lock size={16} />}
                   label="Password"
@@ -903,7 +940,14 @@ function AuthScreen({ onAuth }) {
                   type="password"
                   required
                 />
-              </>
+                {view === 'signin' && (
+                  <div className="flex justify-end mt-1.5">
+                    <button onClick={() => switchView('forgot')} className="text-xs font-semibold hover:underline" style={{ color: '#16a34a' }}>
+                      Forgot password?
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
 
             {view === 'verify' && (
@@ -912,23 +956,35 @@ function AuthScreen({ onAuth }) {
                 <input
                   value={form.code}
                   onChange={e => update('code', e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="000000"
-                  maxLength={6}
+                  placeholder="000000" maxLength={6}
                   className="w-full px-5 py-4 text-center mono"
-                  style={{
-                    background: 'rgba(255, 255, 255, 0.8)',
-                    border: '1px solid rgba(26, 46, 37, 0.12)',
-                    borderRadius: '12px',
-                    color: '#1a2e25',
-                    fontSize: '28px',
-                    letterSpacing: '0.5em',
-                    fontWeight: 700
-                  }}
+                  style={{ background: 'rgba(255,255,255,0.8)', border: '1px solid rgba(26,46,37,0.12)', borderRadius: '12px', color: '#1a2e25', fontSize: '28px', letterSpacing: '0.5em', fontWeight: 700 }}
                 />
                 <div className="flex items-center justify-between mt-3 text-sm">
                   <button onClick={resend} style={{ color: '#16a34a' }} className="font-semibold hover:underline">Resend code</button>
-                  <button onClick={() => { setView('signup'); setError(null); setInfo(null); }} style={{ color: 'rgba(26,46,37,0.5)' }} className="hover:underline">Use a different email</button>
+                  <button onClick={() => switchView('signup')} style={{ color: 'rgba(26,46,37,0.5)' }} className="hover:underline">Use a different email</button>
                 </div>
+              </div>
+            )}
+
+            {view === 'forgot_sent' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="text-sm font-medium mb-1.5 block" style={{ color: '#1a2e25' }}>Reset code</label>
+                  <input
+                    value={form.code}
+                    onChange={e => update('code', e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="000000" maxLength={6}
+                    className="w-full px-5 py-4 text-center mono"
+                    style={{ background: 'rgba(255,255,255,0.8)', border: '1px solid rgba(26,46,37,0.12)', borderRadius: '12px', color: '#1a2e25', fontSize: '28px', letterSpacing: '0.5em', fontWeight: 700 }}
+                  />
+                  <div className="flex justify-between mt-2 text-sm">
+                    <button onClick={resend} style={{ color: '#16a34a' }} className="font-semibold hover:underline">Resend code</button>
+                    <button onClick={() => switchView('forgot')} style={{ color: 'rgba(26,46,37,0.5)' }} className="hover:underline">Use a different email</button>
+                  </div>
+                </div>
+                <AuthInput icon={<Lock size={16} />} label="New password" value={form.newPassword} onChange={v => update('newPassword', v)} placeholder="8+ characters" type="password" required />
+                <AuthInput icon={<Lock size={16} />} label="Confirm new password" value={form.confirmPassword} onChange={v => update('confirmPassword', v)} placeholder="Re-enter new password" type="password" required />
               </div>
             )}
 
@@ -961,7 +1017,7 @@ function AuthScreen({ onAuth }) {
 
             <button onClick={submit} disabled={loading} className="btn-primary w-full mt-2 flex items-center justify-center gap-2">
               {loading && <Loader2 size={16} className="animate-spin" />}
-              {view === 'signin' ? 'Sign in' : view === 'signup' ? 'Send verification code' : 'Verify and enter dashboard'} →
+              {view === 'signin' ? 'Sign in' : view === 'signup' ? 'Send verification code' : view === 'verify' ? 'Verify and enter dashboard' : view === 'forgot' ? 'Send reset code' : 'Reset password'} →
             </button>
 
             {view === 'signin' && (
@@ -972,21 +1028,26 @@ function AuthScreen({ onAuth }) {
                   <div className="flex-1 h-px" style={{ background: 'rgba(26, 46, 37, 0.1)' }} />
                 </div>
                 <button onClick={demoLogin} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl text-sm font-semibold transition-all"
-                  style={{
-                    background: 'rgba(255, 255, 255, 0.7)',
-                    border: '1.5px dashed rgba(26, 46, 37, 0.2)',
-                    color: 'rgba(26, 46, 37, 0.75)',
-                  }}>
+                  style={{ background: 'rgba(255,255,255,0.7)', border: '1.5px dashed rgba(26,46,37,0.2)', color: 'rgba(26,46,37,0.75)' }}>
                   <Sparkles size={15} style={{ color: '#f59e0b' }} />
                   Try demo — no account needed
                 </button>
               </>
             )}
 
-            {view !== 'verify' && (
+            {(view === 'forgot' || view === 'forgot_sent') && (
+              <p className="text-center text-sm pt-2" style={{ color: 'rgba(26,46,37,0.6)' }}>
+                Remember it?{' '}
+                <button onClick={() => switchView('signin')} className="font-semibold hover:underline" style={{ color: '#16a34a' }}>
+                  Back to sign in
+                </button>
+              </p>
+            )}
+
+            {(view === 'signin' || view === 'signup') && (
               <p className="text-center text-sm pt-4" style={{ color: 'rgba(26, 46, 37, 0.6)' }}>
                 {view === 'signin' ? "Don't have an account? " : "Already have one? "}
-                <button onClick={() => { setView(view === 'signin' ? 'signup' : 'signin'); setError(null); setInfo(null); }}
+                <button onClick={() => switchView(view === 'signin' ? 'signup' : 'signin')}
                   className="font-semibold hover:underline" style={{ color: '#16a34a' }}>
                   {view === 'signin' ? 'Create one' : 'Sign in'}
                 </button>
@@ -3024,11 +3085,10 @@ You are helpful, concise, and specific. Use real numbers from the context above 
       const history = [...messages, userMsg]
         .map(m => ({ role: m.role, content: m.text }));
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch(`${API}/claude`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: CLAUDE_MODEL,
           max_tokens: 1000,
           system: systemPrompt,
           messages: history,

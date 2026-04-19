@@ -309,6 +309,96 @@ app.post('/api/auth/resend', async (req, res) => {
   }
 });
 
+app.post('/api/auth/forgot', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'Email required.' });
+
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
+
+    // Always respond OK to avoid email enumeration
+    if (!user) return res.json({ ok: true, message: 'If that email exists, a reset code has been sent.' });
+
+    const code = generateCode();
+    const code_hash = await bcrypt.hash(code, 10);
+    const expires_at = new Date(Date.now() + CODE_TTL_MINUTES * 60_000).toISOString();
+
+    db.prepare('UPDATE verification_codes SET used=1 WHERE user_id=? AND used=0').run(user.id);
+    db.prepare('INSERT INTO verification_codes (user_id, code_hash, expires_at) VALUES (?,?,?)').run(user.id, code_hash, expires_at);
+
+    // Send reset email
+    if (mailer) {
+      const html = `
+      <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f4f7f3;border-radius:24px">
+        <div style="background:linear-gradient(135deg,#1a3329,#0f1f18);padding:32px;border-radius:16px;text-align:center;margin-bottom:24px">
+          <div style="font-size:28px;font-weight:700;color:#f0fdf4">⚡ EnergyWatch</div>
+        </div>
+        <h2 style="color:#1a2e25">Password reset request</h2>
+        <p style="color:#4b5563;margin:12px 0 24px">Enter this code to reset your password. It expires in ${CODE_TTL_MINUTES} minutes.</p>
+        <div style="background:rgba(34,197,94,0.08);border:1.5px dashed rgba(34,197,94,0.3);border-radius:16px;padding:28px;text-align:center;margin-bottom:24px">
+          <div style="font-family:monospace;font-size:38px;font-weight:700;letter-spacing:0.3em;color:#16a34a">${code}</div>
+        </div>
+        <p style="color:#9ca3af;font-size:13px">If you didn't request this, you can safely ignore it.</p>
+      </div>`;
+      try {
+        await mailer.sendMail({ from: `"EnergyWatch" <${GMAIL_USER}>`, to: user.email, subject: `EnergyWatch password reset code: ${code}`, html });
+      } catch (e) { console.error('Reset email failed:', e.message); }
+    } else {
+      console.log(`\n📧 [PASSWORD RESET] Code for ${user.email}: ${code}\n`);
+    }
+
+    res.json({ ok: true, message: 'If that email exists, a reset code has been sent.' });
+  } catch (err) {
+    console.error('forgot error', err);
+    res.status(500).json({ error: 'Internal error: ' + err.message });
+  }
+});
+
+app.post('/api/auth/reset', async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body || {};
+    if (!email || !code || !newPassword) return res.status(400).json({ error: 'Email, code, and new password required.' });
+    if (newPassword.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim().toLowerCase());
+    if (!user) return res.status(404).json({ error: 'Account not found.' });
+
+    const row = db.prepare('SELECT * FROM verification_codes WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1').get(user.id);
+    if (!row) return res.status(400).json({ error: 'No active reset code. Request a new one.' });
+
+    // Parse expiry — handle both ISO format variants SQLite may store
+    try {
+      const expStr = row.expires_at.includes('T') ? row.expires_at : row.expires_at.replace(' ', 'T') + 'Z';
+      if (new Date() > new Date(expStr)) return res.status(400).json({ error: 'Code expired. Request a new one.' });
+    } catch (e) {
+      console.error('Expiry parse error:', e.message, row.expires_at);
+    }
+
+    const ok = await bcrypt.compare(String(code), row.code_hash);
+    if (!ok) return res.status(400).json({ error: 'Invalid code.' });
+
+    const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    db.prepare('UPDATE verification_codes SET used=1 WHERE id=?').run(row.id);
+    db.prepare('UPDATE users SET password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(newHash, user.id);
+
+    // Security notification email
+    if (mailer) {
+      const html = `<div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px">
+        <h2 style="color:#1a2e25">Your password was reset</h2>
+        <p style="color:#4b5563">Your EnergyWatch password was successfully reset. If you didn't do this, contact us immediately.</p>
+      </div>`;
+      mailer.sendMail({ from: `"EnergyWatch" <${GMAIL_USER}>`, to: user.email, subject: 'Your EnergyWatch password was reset', html }).catch(() => {});
+    } else {
+      console.log(`\n✓ Password reset for ${user.email}\n`);
+    }
+
+    res.json({ ok: true, message: 'Password reset successfully. You can now sign in.' });
+  } catch (err) {
+    console.error('reset error', err);
+    res.status(500).json({ error: 'Internal error: ' + err.message });
+  }
+});
+
 app.post('/api/auth/signin', async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -451,7 +541,50 @@ app.post('/api/notifications/read-all', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ----- GEOCODE + WEATHER -----
+// ----- CLAUDE AI PROXY -----
+// Routes Claude API calls through the backend to avoid CORS issues
+app.post('/api/claude', async (req, res) => {
+  try {
+    const { messages, system, max_tokens = 1000 } = req.body || {};
+    if (!messages) return res.status(400).json({ error: 'messages required' });
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      console.error('Claude proxy: ANTHROPIC_API_KEY is not set in .env');
+      return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured on server. Add it to your .env file and restart.' });
+    }
+
+    console.log(`→ Claude request (${messages.length} messages, max_tokens=${max_tokens})`);
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        'x-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens,
+        system,
+        messages,
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('Claude API error:', response.status, JSON.stringify(data));
+      return res.status(response.status).json({ error: data.error?.message || 'Claude API error' });
+    }
+    console.log(`← Claude response OK (stop_reason: ${data.stop_reason})`);
+    res.json(data);
+  } catch (err) {
+    console.error('Claude proxy error:', err.message);
+    res.status(500).json({ error: 'Claude proxy failed: ' + err.message });
+  }
+});
+
+
 app.get('/api/geocode/zip', async (req, res) => {
   const { zip, country = 'US' } = req.query;
   if (!zip) return res.status(400).json({ error: 'zip required' });
@@ -498,5 +631,6 @@ app.get('/api/weather', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n⚡ EnergyWatch backend running on http://localhost:${PORT}`);
   console.log(`   Health:   GET  http://localhost:${PORT}/api/health`);
-  console.log(`   SMTP:     ${GMAIL_USER ? '✓ ' + GMAIL_USER : '✗ not configured — codes printed to console'}\n`);
+  console.log(`   SMTP:     ${GMAIL_USER ? '✓ ' + GMAIL_USER : '✗ not configured — codes printed to console'}`);
+  console.log(`   Claude:   ${process.env.ANTHROPIC_API_KEY ? '✓ API key loaded (' + process.env.ANTHROPIC_API_KEY.slice(0,12) + '...)' : '✗ ANTHROPIC_API_KEY not set'}\n`);
 });
