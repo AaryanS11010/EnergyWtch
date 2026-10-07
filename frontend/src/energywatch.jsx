@@ -34,7 +34,20 @@ const DEMO_WEATHER = (() => {
   const times = Array.from({ length: days }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() + i); return d.toISOString().slice(0, 10);
   });
+  // Hourly irradiance (W/m²) shaped by each day's radiation sum, keyed by local date/hour
+  const hourly = { time: [], temperature_2m: [], shortwave_radiation: [] };
+  const maxRad = Math.max(...radiation);
+  for (let i = 0; i < days; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const date = d.toLocaleDateString('en-CA');
+    for (let h = 0; h < 24; h++) {
+      hourly.time.push(`${date}T${String(h).padStart(2, '0')}:00`);
+      hourly.temperature_2m.push(Math.round(minTemps[i] + (maxTemps[i] - minTemps[i]) * Math.max(0, Math.sin((h - 9) * Math.PI / 12))));
+      hourly.shortwave_radiation.push(Math.round(Math.max(0, Math.sin((h - 6) * Math.PI / 12)) * 950 * (radiation[i] / maxRad)));
+    }
+  }
   return {
+    hourly,
     current: {
       temperature_2m: 71,
       apparent_temperature: 69,
@@ -117,6 +130,19 @@ const DEFAULT_AI_SETTINGS = {
   autoApproveAdvisories: false,
 };
 
+// Controllable system state — what AI plans change and what revert restores
+const DEFAULT_SYSTEM_STATE = { battery_target: 80, mode: 'normal' };
+
+// State an approved advisory moves the system into (null = no state change)
+function advisoryNewState(action, current) {
+  switch (action) {
+    case 'PRE_CHARGE': return { battery_target: 100, mode: 'pre_charge_night' };
+    case 'SELL_AHEAD': return { battery_target: 60,  mode: 'sell_ahead' };
+    case 'CONSERVE':   return { battery_target: 90,  mode: 'conserve' };
+    default:           return null;
+  }
+}
+
 // Hardware profile — user-editable in Settings
 const DEFAULT_HARDWARE = {
   inverter:       'Enphase IQ8M-72-2-US',
@@ -128,14 +154,46 @@ const DEFAULT_HARDWARE = {
 };
 
 // Central computed stats — single source of truth for all live numbers
-function useSystemStats(aiSettings, hardware, hour) {
+// Solar output from forecast irradiance (W/m²) and air temperature (°F):
+// plane-of-array ≈ GHI/1000 × array kW × system performance ratio,
+// derated 0.4%/°C for cell temperature above 25 °C (cell ≈ air + 0.03·GHI).
+const SOLAR_PERFORMANCE_RATIO = 0.86;
+function solarFromIrradiance(irradianceWm2, tempF, arrayKw) {
+  const tempC = tempF != null ? (tempF - 32) * 5 / 9 : 25;
+  const cellC = tempC + irradianceWm2 * 0.03;
+  const tempDerate = 1 - 0.004 * Math.max(0, cellC - 25);
+  return Math.max(0, irradianceWm2 / 1000) * arrayKw * SOLAR_PERFORMANCE_RATIO * tempDerate;
+}
+
+// Pull irradiance + temp for the given local hour from Open-Meteo hourly data,
+// falling back to the "current" block, then null (caller uses the sine model).
+function irradianceForHour(weather, h) {
+  const hourly = weather?.hourly;
+  if (hourly?.time?.length && hourly.shortwave_radiation) {
+    const tz = weather.timezone;
+    const date = new Date().toLocaleDateString('en-CA', tz ? { timeZone: tz } : undefined);
+    const i = hourly.time.indexOf(`${date}T${String(h).padStart(2, '0')}:00`);
+    if (i >= 0 && hourly.shortwave_radiation[i] != null) {
+      return { ghi: hourly.shortwave_radiation[i], tempF: hourly.temperature_2m?.[i] };
+    }
+  }
+  const c = weather?.current;
+  if (c?.shortwave_radiation != null) return { ghi: c.shortwave_radiation, tempF: c.temperature_2m };
+  return null;
+}
+
+function useSystemStats(aiSettings, hardware, hour, weather = null, systemState = null) {
   return useMemo(() => {
     const s = aiSettings;
     const hw = hardware;
     const h = hour ?? new Date().getHours();
 
-    // Solar generation at current hour (sine curve, scaled to array size)
-    const solarKw = +(Math.max(0, Math.sin((h - 6) * Math.PI / 12)) * hw.solarKw * 0.88).toFixed(2);
+    // Solar generation at current hour: weather-driven when forecast data is loaded,
+    // otherwise a sine curve scaled to array size
+    const wx = irradianceForHour(weather, h);
+    const solarKw = +(wx
+      ? solarFromIrradiance(wx.ghi, wx.tempF, hw.solarKw)
+      : Math.max(0, Math.sin((h - 6) * Math.PI / 12)) * hw.solarKw * 0.88).toFixed(2);
 
     // Strategy multipliers
     const stratMult = { aggressive: 1.0, balanced: 0.85, self_sufficient: 0.75 }[s.strategy] ?? 0.85;
@@ -154,9 +212,11 @@ function useSystemStats(aiSettings, hardware, hour) {
     const inPeak   = h >= s.peakStart && h < s.peakEnd;
     const gridPrice = +(0.08 + Math.sin((h - 14) * Math.PI / 12) * 0.06 + (inPeak ? 0.08 : 0)).toFixed(3);
 
-    // Battery SoC
-    const battSoc  = Math.round(battMult * 100);
-    const battKwh  = +(hw.batteryKwh * battMult).toFixed(1);
+    // Battery SoC — an applied plan (e.g. pre-charge) overrides the strategy baseline;
+    // reverting it restores mode 'normal', which falls back to the baseline
+    const planActive = systemState && systemState.mode !== 'normal' && systemState.battery_target != null;
+    const battSoc  = planActive ? Math.round(systemState.battery_target) : Math.round(battMult * 100);
+    const battKwh  = +(hw.batteryKwh * battSoc / 100).toFixed(1);
 
     // Revenue per hour from export
     const revenuePerHr = +(exportKw * gridPrice).toFixed(2);
@@ -199,6 +259,7 @@ function useSystemStats(aiSettings, hardware, hour) {
       gridPrice,
       battSoc,
       battKwh,
+      systemMode: systemState?.mode ?? 'normal',
       battCapacity: hw.batteryKwh,
       revenuePerHr,
       surplus: +(surplus).toFixed(2),
@@ -223,7 +284,7 @@ function useSystemStats(aiSettings, hardware, hour) {
       waterLoad,
       appLoad,
     };
-  }, [aiSettings, hardware, hour]);
+  }, [aiSettings, hardware, hour, weather, systemState]);
 }
 
 // -------------------------------------------------------------
@@ -233,6 +294,7 @@ function useSystemStats(aiSettings, hardware, hour) {
 // dispatch plan, and decision tree reasoning.
 // -------------------------------------------------------------
 const CLAUDE_MODEL = 'claude-sonnet-4-5';
+const DISPATCH_INTERVAL_MS = 30000;
 
 function useClaudeAI(weather, stats, aiSettings, hardware, enabled = true) {
   const [claudeData, setClaudeData] = useState(null);
@@ -260,9 +322,9 @@ function useClaudeAI(weather, stats, aiSettings, hardware, enabled = true) {
     const wx = weatherRef.current;
     if (!s || !hw) return;
 
-    // Throttle: skip if fetched in last 60s unless forced
+    // Throttle: skip if fetched in last 30s unless forced
     const now = Date.now();
-    if (!force && now - lastFetchRef.current < 60000) return;
+    if (!force && now - lastFetchRef.current < DISPATCH_INTERVAL_MS) return;
     lastFetchRef.current = now;
     fetchingRef.current = true;
 
@@ -368,10 +430,10 @@ Use real numbers from the snapshot.`;
     }
   }, [enabled]); // stable — reads live data via refs
 
-  // Fire immediately on mount, then every 60s
+  // Fire immediately on mount, then every 30s
   useEffect(() => {
     fetchDecision(true); // force on first mount
-    const id = setInterval(() => fetchDecision(false), 60000);
+    const id = setInterval(() => fetchDecision(false), DISPATCH_INTERVAL_MS);
     return () => clearInterval(id);
   }, [fetchDecision]);
 
@@ -420,6 +482,23 @@ export default function EnergyWatch() {
       return saved ? { ...DEFAULT_HARDWARE, ...JSON.parse(saved) } : DEFAULT_HARDWARE;
     } catch { return DEFAULT_HARDWARE; }
   });
+
+  // Controllable system state (battery target + mode) — persisted so it survives reloads
+  const [systemState, setSystemState] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ew_system_state');
+      return saved ? { ...DEFAULT_SYSTEM_STATE, ...JSON.parse(saved) } : DEFAULT_SYSTEM_STATE;
+    } catch { return DEFAULT_SYSTEM_STATE; }
+  });
+
+  const applySystemState = useCallback((state) => {
+    if (!state) return;
+    setSystemState(prev => {
+      const next = { ...prev, ...state };
+      try { localStorage.setItem('ew_system_state', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
 
   const updateHardware = useCallback((patch) => {
     setHardware(prev => {
@@ -501,6 +580,8 @@ export default function EnergyWatch() {
   const handleLogout = () => {
     api.setToken(null);
     setUser(null); setWeather(null); setNotifications([]);
+    setSystemState(DEFAULT_SYSTEM_STATE);
+    try { localStorage.removeItem('ew_system_state'); } catch {}
   };
 
   const handleLocationSet = async ({ lat, lon, label, zip }) => {
@@ -524,13 +605,16 @@ export default function EnergyWatch() {
 
   const handleRevert = async (id) => {
     if (api.token === 'DEMO_TOKEN') {
+      const target = notifications.find(n => n.id === id);
+      applySystemState(target?.prev_state);
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, reverted: true } : n));
       setNotifications(prev => [...prev, { id: Date.now(), type: 'info', title: 'Reverted (demo)', body: 'Change rolled back in demo mode.', read: false, reverted: false, prev_state: null, new_state: null, action: 'REVERT', created_at: new Date().toISOString() }]);
       showToast('Change reverted (demo mode)', 'success');
       return;
     }
     try {
-      await api.revertNotification(id);
+      const { reverted_state } = await api.revertNotification(id);
+      applySystemState(reverted_state);
       await loadNotifications();
       showToast('Change reverted successfully', 'success');
     } catch (e) {
@@ -582,21 +666,24 @@ export default function EnergyWatch() {
             aiSettings={aiSettings}
             hardware={hardware}
             timezone={weather?.timezone}
+            systemState={systemState}
             onAdvisoryApprove={async (advisory) => {
               if (api.token === 'DEMO_TOKEN') {
                 setNotifications(prev => [{ id: Date.now(), ...advisory, read: false, reverted: false, created_at: new Date().toISOString() }, ...prev]);
+                applySystemState(advisory.new_state);
                 showToast('Plan approved and logged (demo)', 'success'); return;
               }
               try {
                 await api.createNotification(advisory);
+                applySystemState(advisory.new_state);
                 loadNotifications();
                 showToast('Plan approved and logged', 'success');
               } catch { showToast('Failed to log action', 'error'); }
             }}
           />
         )}
-        {activeTab === 'sources' && <EnergySources aiSettings={aiSettings} hardware={hardware} />}
-        {activeTab === 'ai' && <AIDecisions aiSettings={aiSettings} hardware={hardware} weather={weather} />}
+        {activeTab === 'sources' && <EnergySources aiSettings={aiSettings} hardware={hardware} weather={weather} systemState={systemState} />}
+        {activeTab === 'ai' && <AIDecisions aiSettings={aiSettings} hardware={hardware} weather={weather} systemState={systemState} />}
         {activeTab === 'forecast' && <ForecastPanel weather={weather} user={user} />}
         {activeTab === 'settings' && (
           <SettingsPanel
@@ -1385,11 +1472,11 @@ function TopNav({ user, onLogout, activeTab, setActiveTab, unreadCount, onBellCl
 }
 
 /* ============== DASHBOARD ============== */
-function Dashboard({ user, weather, weatherLoading, aiSettings, hardware, timezone, onAdvisoryApprove }) {
+function Dashboard({ user, weather, weatherLoading, aiSettings, hardware, timezone, systemState, onAdvisoryApprove }) {
   const s = aiSettings;
   const { formatted: localTime, hour: localHour } = useLocalTime(timezone);
 
-  const stats = useSystemStats(aiSettings, hardware, localHour);
+  const stats = useSystemStats(aiSettings, hardware, localHour, weather, systemState);
   const { claudeData, claudeLoading, claudeError, refresh } = useClaudeAI(weather, stats, aiSettings, hardware);
   const strategyConfig = {
     aggressive:     { label: 'Selling to grid',       action: 'earning money',      color: '#ef4444' },
@@ -1478,7 +1565,7 @@ function Dashboard({ user, weather, weatherLoading, aiSettings, hardware, timezo
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 fade-up" style={{ animationDelay: '0.1s' }}>
         <MetricCard label="Solar generation" value={stats.solarKw} unit="kW" trend="+12.4%" trendUp icon={<Sun />} accent="#f59e0b" subtext={`Array: ${hardware.solarKw} kW · ${Math.round(stats.solarKw/hardware.solarKw*100)}% capacity`} />
         <MetricCard label="Home demand"      value={stats.demandKw} unit="kW" trend="−3.2%" icon={<Home />} accent="#3b82f6" subtext="HVAC, lighting, appliances" />
-        <MetricCard label="Battery reserve"  value={stats.battSoc} unit="%" trend={stats.battSoc > 90 ? 'Full' : 'Charging'} trendUp icon={<Battery />} accent="#22c55e" subtext={`${stats.battKwh} / ${hardware.batteryKwh} kWh · min ${s.batteryReserve}%`} />
+        <MetricCard label="Battery reserve"  value={stats.battSoc} unit="%" trend={stats.battSoc > 90 ? 'Full' : 'Charging'} trendUp icon={<Battery />} accent="#22c55e" subtext={`${stats.battKwh} / ${hardware.batteryKwh} kWh · min ${s.batteryReserve}%${stats.systemMode !== 'normal' ? ` · ${stats.systemMode.replace(/_/g, ' ')}` : ''}`} />
         <MetricCard label="Grid export"      value={stats.exportKw} unit="kW" trend={stats.revenuePerHr > 0 ? `+$${stats.revenuePerHr}/hr` : '—'} trendUp={stats.exportKw > 0} icon={<ArrowUpFromLine />} accent="#ef4444" subtext={stats.exportKw > 0 ? `$${stats.gridPrice}/kWh · selling` : 'Below threshold'} />
       </div>
 
@@ -1553,7 +1640,7 @@ function Dashboard({ user, weather, weatherLoading, aiSettings, hardware, timezo
         <SavingsCard stats={stats} />
       </div>
 
-      <AdvisoryCard weather={weather} onApprove={onAdvisoryApprove} claudeData={claudeData} claudeLoading={claudeLoading} />
+      <AdvisoryCard weather={weather} systemState={systemState} onApprove={onAdvisoryApprove} claudeData={claudeData} claudeLoading={claudeLoading} />
     </div>
   );
 }
@@ -1644,7 +1731,7 @@ function AIDecisionBanner({ weather, aiSettings, stats, claudeData, claudeLoadin
 }
 
 /* ============== ADVISORY ============== */
-function AdvisoryCard({ weather, onApprove, claudeData, claudeLoading }) {
+function AdvisoryCard({ weather, systemState, onApprove, claudeData, claudeLoading }) {
   // Use Claude's advisory if available, otherwise fall back to weather-based rule
   const advisory = useMemo(() => {
     if (claudeData?.advisory) {
@@ -1668,13 +1755,15 @@ function AdvisoryCard({ weather, onApprove, claudeData, claudeLoading }) {
   }, [claudeData, weather]);
 
   const handleApprove = () => {
+    // Snapshot the live system state before the plan so revert can restore exactly it
+    const newState = advisoryNewState(advisory.action, systemState);
     onApprove({
       type: 'advisory',
       title: `Approved: ${advisory.title}`,
       body: `Plan engaged. ${advisory.body} Expected savings: ${advisory.savings}.`,
       action: advisory.action,
-      prev_state: { battery_target: 80, mode: 'normal' },
-      new_state: { battery_target: 100, mode: 'pre_charge_night' }
+      prev_state: newState ? { ...systemState } : null,
+      new_state: newState
     });
   };
 
@@ -1894,9 +1983,9 @@ function FlowNode({ x, y, label, value, color, icon, big, dim }) {
 }
 
 /* ============== ENERGY SOURCES ============== */
-function EnergySources({ aiSettings, hardware }) {
-  const { hour } = useLocalTime();
-  const stats = useSystemStats(aiSettings, hardware, hour);
+function EnergySources({ aiSettings, hardware, weather, systemState }) {
+  const { hour } = useLocalTime(weather?.timezone);
+  const stats = useSystemStats(aiSettings, hardware, hour, weather, systemState);
   const hw = hardware ?? DEFAULT_HARDWARE;
 
   // Daily kWh estimates (solar model summed over daylight hours)
@@ -2043,10 +2132,10 @@ function DeviceCard({ name, load, percent, source, color }) {
 }
 
 /* ============== AI DECISIONS ============== */
-function AIDecisions({ aiSettings, hardware, weather }) {
-  const { hour: localHour } = useLocalTime();
+function AIDecisions({ aiSettings, hardware, weather, systemState }) {
+  const { hour: localHour } = useLocalTime(weather?.timezone);
   const [tick, setTick] = useState(0);
-  const stats = useSystemStats(aiSettings, hardware, localHour);
+  const stats = useSystemStats(aiSettings, hardware, localHour, weather, systemState);
   const { claudeData, claudeLoading, claudeError, refresh } = useClaudeAI(weather, stats, aiSettings, hardware);
 
   useEffect(() => {
@@ -2141,7 +2230,7 @@ function AIDecisions({ aiSettings, hardware, weather }) {
               </div>
             </div>
           </div>
-          <DispatchPlan aiSettings={aiSettings} currentHour={localHour} claudeDispatch={claudeData?.dispatch_next_6h} />
+          <DispatchPlan aiSettings={aiSettings} currentHour={localHour} battSoc={stats.battSoc} claudeDispatch={claudeData?.dispatch_next_6h} />
         </div>
 
         <div className="card p-7">
@@ -2161,7 +2250,7 @@ function AIDecisions({ aiSettings, hardware, weather }) {
               </div>
             </div>
           </div>
-          <DecisionTree aiSettings={aiSettings} currentHour={localHour} nextReview={nextReview} claudeData={claudeData} claudeLoading={claudeLoading} />
+          <DecisionTree aiSettings={aiSettings} currentHour={localHour} battSoc={stats.battSoc} nextReview={nextReview} claudeData={claudeData} claudeLoading={claudeLoading} />
         </div>
       </div>
     </div>
@@ -2175,13 +2264,12 @@ function computePrice(h, aiSettings) {
 }
 
 // Pure function — decide what action the AI takes at a given hour
-function computeAction(h, aiSettings) {
+function computeAction(h, aiSettings, battSoc = 87) {
   const price = computePrice(h, aiSettings);
   const solar = Math.max(0, Math.sin((h - 6) * Math.PI / 12)) * 9.5;
   const demand = 1.2 + Math.sin(h * 0.5) * 0.6 + (h > 17 && h < 22 ? 2.5 : 0);
   const surplus = solar - demand;
   const inPeak = h >= aiSettings.peakStart && h < aiSettings.peakEnd;
-  const battSoc = 87; // simulated SoC
 
   if (aiSettings.strategy === 'self_sufficient') {
     if (surplus > 0 && battSoc < 95) return { action: 'Charge',    color: '#22c55e', bg: 'rgba(34,197,94,0.1)',    reason: 'Filling battery · self-sufficient mode' };
@@ -2205,13 +2293,13 @@ function computeAction(h, aiSettings) {
   return { action: 'Hold', color: '#f59e0b', bg: 'rgba(245,158,11,0.1)', reason: 'Price between thresholds · holding position' };
 }
 
-function DispatchPlan({ aiSettings, currentHour, claudeDispatch }) {
+function DispatchPlan({ aiSettings, currentHour, battSoc, claudeDispatch }) {
   // Build rule-based fallback for hours not covered by Claude
   const ruleRows = useMemo(() => {
     const result = [];
     for (let offset = 0; offset < 18; offset++) {
       const h = (currentHour + offset) % 24;
-      const { action, color, bg, reason } = computeAction(h, aiSettings);
+      const { action, color, bg, reason } = computeAction(h, aiSettings, battSoc);
       const label = offset === 0 ? `Now · ${String(h).padStart(2,'0')}:00` : `${String(h).padStart(2,'0')}:00`;
       result.push({ label, action, color, bg, reason, isNow: offset === 0, fromClaude: false });
     }
@@ -2256,16 +2344,15 @@ function DispatchPlan({ aiSettings, currentHour, claudeDispatch }) {
   );
 }
 
-function DecisionTree({ aiSettings, currentHour, nextReview, claudeData, claudeLoading }) {
+function DecisionTree({ aiSettings, currentHour, battSoc = 87, nextReview, claudeData, claudeLoading }) {
   const s = aiSettings;
   const price = computePrice(currentHour, s);
   const solar = Math.max(0, Math.sin((currentHour - 6) * Math.PI / 12)) * 9.5;
   const demand = 1.2 + Math.sin(currentHour * 0.5) * 0.6 + (currentHour > 17 && currentHour < 22 ? 2.5 : 0);
   const surplus = +(solar - demand).toFixed(2);
-  const battSoc = 87;
   const inPeak = currentHour >= s.peakStart && currentHour < s.peakEnd;
 
-  const { action, color, bg, reason } = computeAction(currentHour, s);
+  const { action, color, bg, reason } = computeAction(currentHour, s, battSoc);
   const confidence = claudeData?.confidence ?? (price >= s.sellThreshold && surplus > 0 ? 94 : 72);
   const revenue = claudeData?.revenue_per_hr || (action === 'Sell' ? `+$${(surplus * price).toFixed(2)}/hr` : '—');
   const decision = claudeData?.decision || action;
